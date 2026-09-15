@@ -1,8 +1,8 @@
 //! Shared CLI/invocation validation and pure rendering with an injected Unix-millisecond reading.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
-use chrono::{DateTime, Datelike, Days, LocalResult, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Days, LocalResult, Offset, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Tz;
 use dekopon_provider_sdk::ProviderError;
 use serde::{Deserialize, Serialize};
@@ -173,6 +173,12 @@ impl DateInput {
                 }
             }
         }
+        if object
+            .get("days")
+            .is_some_and(|days| days.as_i64().is_none())
+        {
+            return Err(invalid("days must be a signed integer"));
+        }
         let raw: RawInput = serde_json::from_value(value).map_err(|error| {
             ProviderError::new("invalid-input", format!("invalid date input: {error}"))
         })?;
@@ -226,15 +232,24 @@ impl DateInput {
         }
         let mut output = BoundedOutput(String::new());
         match &self.format {
-            Some(format) => {
-                write!(&mut output, "{}", target.format(&format.0)).map_err(|error| {
+            Some(format) => target
+                .format(&format.0)
+                .write_to(&mut output)
+                .map_err(|error| {
                     ProviderError::new(
                         "output-limit",
                         format!("date output exceeds 2048 bytes: {error}"),
                     )
-                })?
+                })?,
+            None => {
+                if target.offset().fix().local_minus_utc() % 60 != 0 {
+                    return Err(ProviderError::new(
+                        "unsupported-offset",
+                        "RFC3339 cannot represent a timezone offset with seconds; use +%F or +%s",
+                    ));
+                }
+                output.0 = target.to_rfc3339_opts(SecondsFormat::Secs, true);
             }
-            None => output.0 = target.to_rfc3339_opts(SecondsFormat::Secs, true),
         }
         Ok(output.0)
     }

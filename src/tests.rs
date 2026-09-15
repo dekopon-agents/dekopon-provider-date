@@ -304,3 +304,47 @@ fn range_limits_and_maximal_format_stay_bounded() {
     );
     assert_eq!(render("2024-01-01T00:00:00Z", json!({"format":""})), "");
 }
+
+#[test]
+fn historical_second_offsets_refuse_default_rfc3339_but_keep_explicit_date_and_seconds() {
+    let instant = "1970-01-01T01:00:00Z";
+    let input = DateInput::from_value(json!({"timezone":"Africa/Monrovia"})).unwrap();
+    assert_eq!(
+        input.render(millis(instant)).unwrap_err().code(),
+        "unsupported-offset"
+    );
+    assert_eq!(
+        render(
+            instant,
+            json!({"timezone":"Africa/Monrovia", "format":"%F %H:%M:%S %z %Z %s"})
+        ),
+        "1970-01-01 00:15:30 -0045 MMT 3600"
+    );
+    let offset =
+        DateInput::from_value(json!({"timezone":"America/New_York", "days":-36600})).unwrap();
+    assert_eq!(offset.render(0).unwrap_err().code(), "unsupported-offset");
+    assert_eq!(
+        DateInput::from_value(json!({"timezone":"America/New_York", "days":-36600,"format":"%z"}))
+            .unwrap()
+            .render(0)
+            .unwrap(),
+        "-0456"
+    );
+    assert_eq!(
+        render(
+            "2024-01-01T01:00:00Z",
+            json!({"timezone":"Africa/Monrovia"})
+        ),
+        "2024-01-01T01:00:00Z"
+    );
+}
+
+#[test]
+fn invalid_day_type_errors_do_not_echo_unbounded_input() {
+    let error = match DateInput::from_value(json!({"days":"sentinel".repeat(10000)})) {
+        Ok(_) => panic!("wrong type must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "invalid-input");
+    assert_eq!(error.message(), "days must be a signed integer");
+}

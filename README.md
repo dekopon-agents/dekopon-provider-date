@@ -34,7 +34,7 @@ Supported strftime conversions (Chrono performs calendar conversion and formatti
 | `%F` | ISO calendar date (`%Y-%m-%d`) |
 | `%Y`, `%m`, `%d` | Four-digit year, two-digit month and day |
 | `%H`, `%M`, `%S` | Two-digit 24-hour hour, minute and second |
-| `%z` | Numeric UTC offset, e.g. `-0500` |
+| `%z` | Numeric UTC offset, e.g. `-0500`; historical offset seconds round to nearest minute |
 | `%Z` | Timezone abbreviation, e.g. `EST` or `EDT` (not a unique zone identifier) |
 | `%s` | Unix seconds of the resulting instant, floored to seconds |
 | `%%` | Literal percent |
@@ -52,7 +52,7 @@ with `Z` at zero offset. Fractional milliseconds are not printed.
 the date in the chosen timezone while preserving local hour/minute/second/millisecond. It does
 **not** add `N * 86400` elapsed seconds: noon across a DST transition can be 23 or 25 hours apart.
 Calendar handling is proleptic Gregorian, provided by Chrono. IANA rules are bundled by
-`chrono-tz` 0.10.4; updating timezone legislation requires a dependency update and provider release,
+`chrono-tz` 0.10.4 (IANA 2025b); updating timezone legislation requires a dependency update and provider release,
 not access to system zoneinfo.
 
 For **nonzero** offsets, a destination in a DST fold (ambiguous) or gap (nonexistent, including a
@@ -61,6 +61,12 @@ with `+%F`: the provider never silently changes the target wall time. Zero prese
 instant, including either side of a fold. Host milliseconds beyond 9999-12-31T23:59:59.999Z fail;
 resulting local and UTC years must both be 0001..9999. Negative offsets can produce pre-epoch dates
 and negative `%s`. Overflow is checked and fails, not wrapped.
+
+Historical zones can have second-resolution offsets. Default RFC3339 rejects those with
+`unsupported-offset` rather than printing a timestamp that represents a different instant.
+Explicit `%z` follows Chrono's conventional nearest-minute rounding (ties away from zero),
+so it cannot preserve those historical seconds. `+%F` and `+%s` remain usable without rounding
+calendar dates or Unix seconds. `%+` and other alternative RFC3339 conversions are not supported.
 
 No GNU/BSD date compatibility, natural-language parsing, `-d`, environment `TZ`, locale, date
 setting, arbitrary timestamps, HTTP, storage, files, secrets, or network access is implemented.
@@ -87,8 +93,8 @@ native broker test. Pair it with an exact `clock.now` constraint set owned by pr
 ```yaml
 clock.now:
   provider: date
-  effect: readOnly
-  risk: low
+  effect: read-only
+  risk: Low
   constraints:
     timeoutMs: 10000
     maxOutputBytes: 4096

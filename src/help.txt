@@ -8,6 +8,7 @@ Supported conversions: %F %Y %m %d %H %M %S %z %Z %s %%
 Formats: at most 256 printable ASCII bytes; no flags, widths, or modifiers.
 Days: -36600..36600 local calendar days, preserving wall time, not 86400s.
 Nonzero offsets landing in a timezone gap or fold fail; zero keeps the instant.
+Historical offsets with seconds fail in default RFC3339; explicit %z rounds to nearest minute.
 Limits: 8 arguments, 1024 total argument bytes, 64 timezone bytes, 2048 output bytes.
 No TZ environment, date parsing, clock setting, or GNU/BSD compatibility.
 Help and command proposals never read the clock; clock.now requires broker authorization.

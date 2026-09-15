@@ -184,6 +184,14 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
     assert_eq!(denied.outcome, InvocationOutcome::Denied);
     assert!(denied.output.is_none());
     assert!(
+        audit
+            .records()
+            .await
+            .iter()
+            .all(|event| !matches!(event, dekopon_broker::AuditEvent::Execution { .. })),
+        "Cedar denial must produce no execution record"
+    );
+    assert!(
         reads.0.lock().unwrap().is_empty(),
         "Cedar denial must not invoke the clock"
     );
