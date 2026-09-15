@@ -1,0 +1,7 @@
+package dekopon:date@0.1.0;
+
+/// A bounded date command using only the broker's authorized wall clock.
+world provider {
+    include dekopon:provider/provider-cli@0.3.0;
+    import dekopon:clock/wall@1.0.0;
+}

@@ -1,0 +1,49 @@
+[workspace]
+
+[package]
+name = "dekopon-date-provider"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Bounded date formatting and local calendar offsets using the Dekopon broker clock"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dekopon-agents/dekopon-provider-date"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+chrono-tz = { version = "=0.10.4", default-features = false }
+dekopon-provider-clock = "=0.15.2"
+dekopon-provider-sdk = "=0.15.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+wit-bindgen = { version = "=0.62.0", default-features = false, features = ["macros", "realloc"] }
+
+[dev-dependencies]
+dekopon-broker = "=0.15.2"
+dekopon-broker-host = "=0.15.2"
+dekopon-capability = { version = "=0.15.2", default-features = false }
+dekopon-core = { version = "=0.15.2", default-features = false }
+dekopon-shell = "=0.15.2"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["registry"] }
+wasmtime = { version = "=48.0.2", default-features = false, features = ["async", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
