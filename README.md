@@ -3,9 +3,9 @@
 A bounded `date` command for Dekopon agents. It reads the **broker's fresh clock**, not the
 model's recollection, machine environment, or a timestamp supplied by the caller.
 
-Requires the broker clock import `dekopon:clock/wall@1.0.0`; minimum tested host is **0.15.2**.
-Guest SDK and clock bindings, native broker conformance, and shell tests pin published 0.15.2.
-The component exports provider-cli 0.3.0. Version 0.1.0 is initial source, not a published release.
+Requires the broker clock import `dekopon:clock/wall@1.0.0`; minimum tested host is **0.18.0**.
+Guest SDK and clock bindings, native broker conformance, and shell tests pin published 0.18.0.
+The component exports provider-cli 0.3.0. Version 0.2.0 uses SDK 0.18.0 with unchanged command behavior.
 
 ## Command
 
@@ -119,7 +119,7 @@ DEKOPON_PROVIDER_COMPONENT="$PWD/date-provider.wasm" cargo test --locked --works
 
 Integration tests **fail**, never skip, without `DEKOPON_PROVIDER_COMPONENT`. Tests cover UTC/IANA
 rendering, boundaries, DST and range failures; an empty-linker refusal and fixed-clock component
-plus real shell substitutions; and the published native 0.15.2 broker with Cedar allow/deny and
+plus real shell substitutions; and the published native 0.18.0 broker with Cedar allow/deny and
 `provider_clock_read` trace evidence only inside invoke. Native formatter tests alone do not prove
 the host import works.
 
@@ -142,12 +142,11 @@ Release permissions: contents/packages/attestations write and id-token write. Cu
 the organization release App (`DEKOPON_RELEASE_APP_ID` / `DEKOPON_RELEASE_APP_KEY`) with repository
 contents write so its tag push triggers release; maintainers must confirm installation and secret
 visibility. This component is `publish = false`: no crates.io publication/trusted publisher is
-needed. No release has been cut or publishing authorization exercised by this implementation.
+needed.
 
-The shared cut-release commits a **changed** version, so dispatching 0.1.0 while the manifest
-already says 0.1.0 will have nothing to commit. Maintainers must choose an authorized version change
-(e.g. prerelease) or separately authorize an annotated initial tag after main's exact-head gate;
-do not change or work around the shared workflow silently.
+The version is bumped in the release PR, then an annotated `v0.2.0` tag on the merged main
+commit triggers the shared release workflow. Do not dispatch cut-release for an already-bumped
+version: that workflow expects to commit a version change.
 
 ## License
 

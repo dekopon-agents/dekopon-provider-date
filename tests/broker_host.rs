@@ -1,4 +1,4 @@
-//! Actual published 0.15.2 broker + Cedar + component boundary, not a mock clock host.
+//! Actual published 0.18.0 broker + Cedar + component boundary, not a mock clock host.
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -11,7 +11,7 @@ use dekopon_broker::{
     CredentialStore, IdentityDirectory, InMemoryAuditLog, InvocationRequest, PolicyEngine,
     PolicyWorld,
 };
-use dekopon_broker_host::{BrokerHostLimits, BrokerProviderRegistry};
+use dekopon_broker_host::{BrokerHostLimits, BrokerProviderRegistry, asset::AssetInputs};
 use dekopon_capability::{EffectKind, ExecutionConstraints, InvocationOutcome};
 use dekopon_core::{Actor, PrincipalId, RiskLevel};
 use dekopon_provider_sdk::{CommandRunOutcome, ProviderApiVersion};
@@ -161,6 +161,7 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
                     max_output_bytes: 4096,
                     http: None,
                     storage: None,
+                    asset: None,
                     secret_use: None,
                 },
             },
@@ -178,11 +179,12 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
             None,
             None,
             request("denied", json!({"format":"%s"})),
+            AssetInputs::default(),
         )
         .await
         .unwrap();
-    assert_eq!(denied.outcome, InvocationOutcome::Denied);
-    assert!(denied.output.is_none());
+    assert_eq!(denied.result.outcome, InvocationOutcome::Denied);
+    assert!(denied.result.output.is_none());
     assert!(
         audit
             .records()
@@ -201,10 +203,11 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
             None,
             None,
             request("invalid", json!({"format":"%Q"})),
+            AssetInputs::default(),
         )
         .await
         .unwrap();
-    assert_eq!(invalid.outcome, InvocationOutcome::Failed);
+    assert_eq!(invalid.result.outcome, InvocationOutcome::Failed);
     assert!(
         reads.0.lock().unwrap().is_empty(),
         "invalid direct input must fail before clock"
@@ -216,12 +219,17 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
             None,
             None,
             request("allowed", json!({"format":"%s"})),
+            AssetInputs::default(),
         )
         .await
         .unwrap();
     let after = unix_seconds();
-    assert_eq!(result.outcome, InvocationOutcome::Succeeded, "{result:?}");
-    let text = result.output.unwrap();
+    assert_eq!(
+        result.result.outcome,
+        InvocationOutcome::Succeeded,
+        "{result:?}"
+    );
+    let text = result.result.output.unwrap();
     let seconds: u64 = text.as_str().unwrap().parse().unwrap();
     assert!((before..=after).contains(&seconds));
     let captured = reads.0.lock().unwrap().clone();
@@ -234,14 +242,15 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
             None,
             None,
             request("bounded", json!({"format":"%s".repeat(128)})),
+            AssetInputs::default(),
         )
         .await
         .unwrap();
-    assert_eq!(output.outcome, InvocationOutcome::Succeeded);
-    assert!(output.output.unwrap().as_str().unwrap().len() <= 2048);
+    assert_eq!(output.result.outcome, InvocationOutcome::Succeeded);
+    assert!(output.result.output.unwrap().as_str().unwrap().len() <= 2048);
     assert_eq!(reads.0.lock().unwrap().len(), 2);
     assert!(!audit.records().await.is_empty());
     eprintln!(
-        "real broker 0.15.2: component={bytes} bytes; clock reads=2; denied/invalid/proposals/help reads=0; no HTTP/storage/secret grants"
+        "real broker 0.18.0: component={bytes} bytes; clock reads=2; denied/invalid/proposals/help reads=0; no HTTP/storage/secret grants"
     );
 }
