@@ -125,8 +125,8 @@ the host import works.
 
 ## CI and release provenance
 
-CI, release, and cut-release are minimal callers of `dekopon-agents/provider-workflows` **v3**,
-pinned at `4cb9276ca166bee05c04e4c40ad9bca4b1f1065c`. No pipeline is duplicated here.
+CI and release are minimal callers of `dekopon-agents/provider-workflows` at `@main`. No pipeline
+is duplicated here.
 Shared CI checks formatting, dependency policy, native/Wasm lint, byte-identical SDK WIT mirrors,
 component imports, native tests, SBOM, checksum, and independently rebuilt identical bytes.
 
@@ -138,15 +138,11 @@ and verifies public provenance. Expected signer workflow:
 Verify with `gh attestation verify --repo dekopon-agents/dekopon-provider-date`, pinning that signer,
 the release source ref/digest and denying self-hosted runners as in the shared recipe.
 
-Release permissions: contents/packages/attestations write and id-token write. Cut-release requires
-the organization release App (`DEKOPON_RELEASE_APP_ID` / `DEKOPON_RELEASE_APP_KEY`) with repository
-contents write so its tag push triggers release; maintainers must confirm installation and secret
-visibility. This component is `publish = false`: no crates.io publication/trusted publisher is
+Release permissions: contents/packages/attestations write and id-token write. This component is `publish = false`: no crates.io publication/trusted publisher is
 needed.
 
-The version is bumped in the release PR, then an annotated `v0.2.0` tag on the merged main
-commit triggers the shared release workflow. Do not dispatch cut-release for an already-bumped
-version: that workflow expects to commit a version change.
+To release, commit the version bump to `main`, then push an annotated `vX.Y.Z` tag on that commit.
+The tag triggers the shared release workflow.
 
 ## License
 
