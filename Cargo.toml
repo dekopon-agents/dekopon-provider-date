@@ -31,7 +31,7 @@ dekopon-shell = "=0.18.0"
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["registry"] }
-wasmtime = { version = "=48.0.2", default-features = false, features = ["async", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
+wasmtime = { version = "=48.0.3", default-features = false, features = ["async", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
 
 [profile.release]
 codegen-units = 1
