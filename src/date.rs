@@ -1,11 +1,12 @@
 //! Shared CLI/invocation validation and pure rendering with an injected Unix-millisecond reading.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use chrono::{DateTime, Datelike, Days, LocalResult, Offset, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Tz;
-use dekopon_provider_sdk::ProviderError;
-use serde::{Deserialize, Serialize};
+use dekopon_provider_sdk::provider::{Code, Failure};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const MAX_FORMAT_BYTES: usize = 256;
@@ -16,13 +17,42 @@ const MAX_ARG_BYTES: usize = 1024;
 const MAX_TIMEZONE_BYTES: usize = 64;
 const MAX_MILLIS: u64 = 253_402_300_799_999;
 
-fn invalid(message: &'static str) -> ProviderError {
-    ProviderError::new("invalid-input", message)
+#[derive(Debug)]
+pub struct DateError {
+    code: Code,
+    message: String,
+}
+impl DateError {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code: Code::new(code),
+            message: message.into(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn code(&self) -> &'static str {
+        self.code.as_str()
+    }
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+impl fmt::Display for DateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl Failure for DateError {
+    fn code(&self) -> Code {
+        self.code
+    }
+}
+fn invalid(message: &'static str) -> DateError {
+    DateError::new("invalid-input", message)
 }
 
-#[derive(Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawInput {
+#[derive(Default, Serialize)]
+pub struct RawInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<String>,
     #[serde(default = "utc")]
@@ -30,12 +60,42 @@ pub(crate) struct RawInput {
     days: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawFields {
+    format: Option<String>,
+    #[serde(default = "utc")]
+    timezone: String,
+    days: i64,
+}
+impl Default for RawFields {
+    fn default() -> Self {
+        Self {
+            format: None,
+            timezone: utc(),
+            days: 0,
+        }
+    }
+}
+impl<'de> Deserialize<'de> for RawInput {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        validate_value(&value).map_err(serde::de::Error::custom)?;
+        let fields: RawFields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            format: fields.format,
+            timezone: fields.timezone,
+            days: fields.days,
+        })
+    }
+}
+
 fn utc() -> String {
     "UTC".to_owned()
 }
 
 impl RawInput {
-    pub(crate) fn from_argv(argv: &[String]) -> Result<Self, ProviderError> {
+    pub(crate) fn from_argv(argv: &[String]) -> Result<Self, DateError> {
         if argv.len() > MAX_ARGV
             || argv.iter().any(|arg| arg.len() > MAX_ARG_BYTES)
             || argv.iter().map(String::len).sum::<usize>() > MAX_ARG_BYTES
@@ -84,7 +144,7 @@ impl RawInput {
                     arg.strip_prefix("--days=").expect("prefix checked")
                 };
                 input.days = days.parse().map_err(|error| {
-                    ProviderError::new(
+                    DateError::new(
                         "invalid-input",
                         format!("--days requires a signed integer: {error}"),
                     )
@@ -97,13 +157,13 @@ impl RawInput {
         Ok(input)
     }
 
-    fn validate(&self) -> Result<DateInput, ProviderError> {
+    fn validate(&self) -> Result<DateInput, DateError> {
         let format = self.format.as_deref().map(DateFormat::parse).transpose()?;
         if self.timezone.len() > MAX_TIMEZONE_BYTES {
             return Err(invalid("timezone exceeds 64 bytes"));
         }
         let timezone = self.timezone.parse().map_err(|error| {
-            ProviderError::new("invalid-input", format!("invalid IANA timezone: {error}"))
+            DateError::new("invalid-input", format!("invalid IANA timezone: {error}"))
         })?;
         if !(-MAX_DAYS..=MAX_DAYS).contains(&self.days) {
             return Err(invalid("days must be between -36600 and 36600"));
@@ -116,11 +176,22 @@ impl RawInput {
     }
 }
 
+impl JsonSchema for RawInput {
+    fn schema_name() -> Cow<'static, str> {
+        "DateInput".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schema()
+            .try_into()
+            .expect("static date schema is a JSON object")
+    }
+}
+
 struct DateFormat(String);
 struct DayOffset(i64);
 
 impl DateFormat {
-    fn parse(format: &str) -> Result<Self, ProviderError> {
+    fn parse(format: &str) -> Result<Self, DateError> {
         if format.len() > MAX_FORMAT_BYTES || !format.bytes().all(|b| (b' '..=b'~').contains(&b)) {
             return Err(invalid("format must be at most 256 printable ASCII bytes"));
         }
@@ -148,52 +219,28 @@ pub(crate) struct DateInput {
 }
 
 impl DateInput {
-    pub(crate) fn from_value(value: Value) -> Result<Self, ProviderError> {
-        // Inspect lengths before serde can clone strings. Unknown field/type errors remain bounded.
-        let object = value
-            .as_object()
-            .ok_or_else(|| invalid("input must be an object"))?;
-        if object.len() > 3
-            || object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "format" | "timezone" | "days"))
-        {
-            return Err(invalid("input accepts only format, timezone, and days"));
-        }
-        for (key, limit) in [
-            ("format", MAX_FORMAT_BYTES),
-            ("timezone", MAX_TIMEZONE_BYTES),
-        ] {
-            if let Some(value) = object.get(key) {
-                let text = value
-                    .as_str()
-                    .ok_or_else(|| invalid("format and timezone must be strings"))?;
-                if text.len() > limit {
-                    return Err(invalid("format or timezone exceeds its byte limit"));
-                }
-            }
-        }
-        if object
-            .get("days")
-            .is_some_and(|days| days.as_i64().is_none())
-        {
-            return Err(invalid("days must be a signed integer"));
-        }
+    pub(crate) fn from_raw(raw: RawInput) -> Result<Self, DateError> {
+        raw.validate()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_value(value: Value) -> Result<Self, DateError> {
+        validate_value(&value)?;
         let raw: RawInput = serde_json::from_value(value).map_err(|error| {
-            ProviderError::new("invalid-input", format!("invalid date input: {error}"))
+            DateError::new("invalid-input", format!("invalid date input: {error}"))
         })?;
         raw.validate()
     }
 
-    pub(crate) fn render(&self, millis: u64) -> Result<String, ProviderError> {
+    pub(crate) fn render(&self, millis: u64) -> Result<String, DateError> {
         if millis > MAX_MILLIS {
-            return Err(ProviderError::new(
+            return Err(DateError::new(
                 "clock-out-of-range",
                 "host clock is past year 9999",
             ));
         }
         let now = DateTime::<Utc>::from_timestamp_millis(millis as i64)
-            .ok_or_else(|| ProviderError::new("clock-out-of-range", "invalid host timestamp"))?
+            .ok_or_else(|| DateError::new("clock-out-of-range", "invalid host timestamp"))?
             .with_timezone(&self.timezone);
         // Zero preserves the actual instant even in a fold. Nonzero offsets preserve wall time,
         // not elapsed seconds, and reject a destination with zero or two corresponding instants.
@@ -210,13 +257,13 @@ impl DateInput {
             match self.timezone.from_local_datetime(&local) {
                 LocalResult::Single(target) => target,
                 LocalResult::Ambiguous(_, _) => {
-                    return Err(ProviderError::new(
+                    return Err(DateError::new(
                         "ambiguous-local-time",
                         "offset lands in a timezone fold",
                     ));
                 }
                 LocalResult::None => {
-                    return Err(ProviderError::new(
+                    return Err(DateError::new(
                         "nonexistent-local-time",
                         "offset lands in a timezone gap",
                     ));
@@ -236,14 +283,14 @@ impl DateInput {
                 .format(&format.0)
                 .write_to(&mut output)
                 .map_err(|error| {
-                    ProviderError::new(
+                    DateError::new(
                         "output-limit",
                         format!("date output exceeds 2048 bytes: {error}"),
                     )
                 })?,
             None => {
                 if target.offset().fix().local_minus_utc() % 60 != 0 {
-                    return Err(ProviderError::new(
+                    return Err(DateError::new(
                         "unsupported-offset",
                         "RFC3339 cannot represent a timezone offset with seconds; use +%F or +%s",
                     ));
@@ -253,6 +300,39 @@ impl DateInput {
         }
         Ok(output.0)
     }
+}
+
+fn validate_value(value: &Value) -> Result<(), DateError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid("input must be an object"))?;
+    if object.len() > 3
+        || object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "format" | "timezone" | "days"))
+    {
+        return Err(invalid("input accepts only format, timezone, and days"));
+    }
+    for (key, limit) in [
+        ("format", MAX_FORMAT_BYTES),
+        ("timezone", MAX_TIMEZONE_BYTES),
+    ] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or_else(|| invalid("format and timezone must be strings"))?;
+            if text.len() > limit {
+                return Err(invalid("format or timezone exceeds its byte limit"));
+            }
+        }
+    }
+    if object
+        .get("days")
+        .is_some_and(|days| days.as_i64().is_none())
+    {
+        return Err(invalid("days must be a signed integer"));
+    }
+    Ok(())
 }
 
 struct BoundedOutput(String);

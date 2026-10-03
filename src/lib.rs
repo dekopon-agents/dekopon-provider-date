@@ -1,78 +1,81 @@
 //! Date formatting owns no clock: only authorized invocation reads the broker's clock import.
 
-mod date;
+pub mod date;
 
-use date::{DateInput, RawInput};
-use dekopon_provider_sdk::{
-    CapabilityId, CommandRun, EffectKind, Provider, ProviderApiVersion, ProviderCapability,
-    ProviderError, ProviderManifest, RiskLevel,
-};
-use serde_json::{Value, json};
+use clap::Parser;
+use date::{DateError, DateInput, RawInput};
+use dekopon_provider_sdk::provider::{Capability, Clock, Proposal, Provider, Stdout, Usage};
+use dekopon_provider_sdk::{EffectKind, RiskLevel};
+use std::io::Write;
 
-mod bindings {
-    wit_bindgen::generate!({
-        path: "wit",
-        world: "provider",
-        generate_all,
-        pub_export_macro: true,
-    });
-}
-
-struct DateProvider;
-const NOW: &str = "clock.now";
-const HELP: &str = include_str!("help.txt");
+pub struct DateProvider;
+pub struct Now;
 const DESCRIPTION: &str =
     "Formats the fresh broker clock with explicit timezone and local calendar-day offsets";
 
+#[derive(Parser)]
+#[command(name = "date", about = DESCRIPTION)]
+pub struct DateArgs {
+    #[arg(short = 'u', long = "utc", conflicts_with = "timezone")]
+    utc: bool,
+    #[arg(long, value_name = "NAME")]
+    timezone: Option<String>,
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    days: Option<String>,
+    #[arg(value_name = "+FORMAT")]
+    format: Option<String>,
+}
+
 impl Provider for DateProvider {
-    fn manifest() -> ProviderManifest {
-        ProviderManifest {
-            api_version: ProviderApiVersion::V1Alpha1,
-            id: "date".parse().expect("static provider ID"),
-            description: DESCRIPTION.to_owned(),
-            command_words: vec!["date".to_owned()],
-            capabilities: vec![ProviderCapability {
-                id: NOW.parse().expect("static capability ID"),
-                description: DESCRIPTION.to_owned(),
-                effect: EffectKind::ReadOnly,
-                risk: RiskLevel::Low,
-                input_schema: date::schema(),
-            }],
-        }
-    }
+    const ID: &'static str = "date";
+    const COMMAND_WORDS: &'static [&'static str] = &["date"];
+    const DESCRIPTION: &'static str = DESCRIPTION;
+    type Args = DateArgs;
+    type Capabilities = (Now,);
 
-    fn invoke(capability: &CapabilityId, input: Value) -> Result<Value, ProviderError> {
-        if capability.as_str() != NOW {
-            return Err(ProviderError::new(
-                "unsupported",
-                "date implements only clock.now",
-            ));
+    fn propose(args: Self::Args, _stdin_piped: bool) -> Result<Proposal<Self>, Usage> {
+        let mut words = Vec::new();
+        if args.utc {
+            words.push("--utc".to_owned());
         }
-        // The schema is metadata, not enforcement. Validate again before touching the host.
-        let input = DateInput::from_value(input)?;
-        let millis = dekopon_provider_clock::now_unix_millis();
-        // The shell prints a JSON string verbatim and adds one newline; do not double it here.
-        Ok(json!(input.render(millis)?))
-    }
-
-    fn run_command(argv: &[String], _stdin: Option<&str>) -> Result<CommandRun, ProviderError> {
-        if argv.len() == 1 && argv[0] == "--help" {
-            return Ok(CommandRun::rendered(HELP, 0));
+        if let Some(zone) = args.timezone {
+            words.extend(["--timezone".to_owned(), zone]);
         }
-        match RawInput::from_argv(argv) {
-            Ok(input) => Ok(CommandRun::proposal(
-                NOW.parse().expect("static capability ID"),
-                serde_json::to_value(input).expect("bounded input serializes"),
-            )),
-            Err(error) => Ok(CommandRun::rendered_error(
-                format!("date: {}\nTry 'date --help'.\n", error.message()),
-                2,
-            )),
+        if let Some(days) = args.days {
+            words.extend(["--days".to_owned(), days]);
         }
+        if let Some(format) = args.format {
+            words.push(format);
+        }
+        RawInput::from_argv(&words)
+            .map(Proposal::to::<Now>)
+            .map_err(|error| Usage::new(error.message().to_owned()))
     }
 }
 
-dekopon_provider_sdk::export_provider_with_cli!(DateProvider, bindings);
+impl Capability for Now {
+    type Provider = DateProvider;
+    const NAME: &'static str = "now";
+    const DESCRIPTION: &'static str = DESCRIPTION;
+    const EFFECT: EffectKind = EffectKind::ReadOnly;
+    const RISK: RiskLevel = RiskLevel::Low;
+    type Input = RawInput;
+    type Needs = Clock;
+    type Error = DateError;
+
+    fn run(input: RawInput, clock: Clock, out: &mut Stdout) -> Result<(), DateError> {
+        let input = DateInput::from_raw(input)?;
+        let rendered = input.render(clock.now_unix_millis())?;
+        out.write_all(rendered.as_bytes())
+            .and_then(|_| out.write_all(b"\n"))
+            .map_err(|_| DateError::new("output-limit", "date output could not be written"))
+    }
+}
+
+#[allow(unsafe_code)]
+mod export {
+    dekopon_provider_sdk::export!(super::DateProvider);
+}
 
 #[cfg(test)]
 mod tests;
