@@ -2,7 +2,7 @@
 
 pub mod date;
 
-use clap::Parser;
+use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use date::{DateError, DateInput, RawInput};
 use dekopon_provider_sdk::provider::{Capability, Clock, Proposal, Provider, Stdout, Usage};
 use dekopon_provider_sdk::{EffectKind, RiskLevel};
@@ -14,17 +14,57 @@ const DESCRIPTION: &str =
     "Formats the fresh broker clock with explicit timezone and local calendar-day offsets";
 
 #[derive(Parser)]
-#[command(name = "date", about = DESCRIPTION)]
-pub struct DateArgs {
-    #[arg(short = 'u', long = "utc", conflicts_with = "timezone")]
-    utc: bool,
-    #[arg(long, value_name = "NAME")]
-    timezone: Option<String>,
-    #[arg(long, value_name = "N", allow_hyphen_values = true)]
-    days: Option<String>,
-    #[arg(value_name = "+FORMAT")]
-    format: Option<String>,
+#[command(name = "date", about = DESCRIPTION, disable_help_flag = true, trailing_var_arg = true)]
+struct Grammar {
+    #[arg(allow_hyphen_values = true)]
+    words: Vec<String>,
 }
+
+pub struct DateArgs(RawInput);
+
+impl CommandFactory for DateArgs {
+    fn command() -> Command {
+        Grammar::command()
+    }
+    fn command_for_update() -> Command {
+        Grammar::command_for_update()
+    }
+}
+impl FromArgMatches for DateArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let args = Grammar::from_arg_matches(matches)?;
+        if args.words.first().is_some_and(|word| word == "--help") {
+            return if args.words.len() == 1 {
+                Err(clap::Error::raw(
+                    ErrorKind::DisplayHelp,
+                    include_str!("help.txt"),
+                ))
+            } else {
+                Err(clap::Error::raw(
+                    ErrorKind::ArgumentConflict,
+                    "date: --help must stand alone",
+                ))
+            };
+        }
+        if args.words.iter().any(|word| word == "--help") {
+            return Err(clap::Error::raw(
+                ErrorKind::ArgumentConflict,
+                "date: --help must stand alone",
+            ));
+        }
+        RawInput::from_argv(&args.words).map(Self).map_err(|_| {
+            clap::Error::raw(
+                ErrorKind::InvalidValue,
+                "date: invalid arguments (try date --help)",
+            )
+        })
+    }
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+impl Parser for DateArgs {}
 
 impl Provider for DateProvider {
     const ID: &'static str = "date";
@@ -34,22 +74,7 @@ impl Provider for DateProvider {
     type Capabilities = (Now,);
 
     fn propose(args: Self::Args, _stdin_piped: bool) -> Result<Proposal<Self>, Usage> {
-        let mut words = Vec::new();
-        if args.utc {
-            words.push("--utc".to_owned());
-        }
-        if let Some(zone) = args.timezone {
-            words.extend(["--timezone".to_owned(), zone]);
-        }
-        if let Some(days) = args.days {
-            words.extend(["--days".to_owned(), days]);
-        }
-        if let Some(format) = args.format {
-            words.push(format);
-        }
-        RawInput::from_argv(&words)
-            .map(Proposal::to::<Now>)
-            .map_err(|error| Usage::new(error.message().to_owned()))
+        Ok(Proposal::to::<Now>(args.0))
     }
 }
 

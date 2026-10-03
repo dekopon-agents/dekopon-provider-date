@@ -33,6 +33,7 @@ impl DateError {
     pub(crate) fn code(&self) -> &'static str {
         self.code.as_str()
     }
+    #[cfg(test)]
     pub(crate) fn message(&self) -> &str {
         &self.message
     }

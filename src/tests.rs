@@ -194,6 +194,13 @@ fn argv_rejects_unknown_missing_extra_and_conflicting_arguments() {
         vec!["+%F", "extra"],
     ] {
         assert!(RawInput::from_argv(&argv(&words)).is_err(), "{words:?}");
+        assert!(
+            matches!(
+                provider::command::<DateProvider>(&argv(&words), false),
+                CommandRunOutcome::Rendered { status: 2, .. }
+            ),
+            "CLI accepted {words:?}"
+        );
     }
     assert!(RawInput::from_argv(&vec!["-u".to_owned(); 9]).is_err());
     assert!(RawInput::from_argv(&["x".repeat(1025)]).is_err());
@@ -231,6 +238,21 @@ fn proposals_help_and_manifest_are_exact_and_pure() {
     assert!(
         matches!(command(&["--help"], false), CommandRunOutcome::Rendered { status: 0, stdout, .. } if stdout.contains("date"))
     );
+    for words in [vec!["--help", "extra"], vec!["+%F", "--help"]] {
+        assert!(matches!(
+            command(&words, false),
+            CommandRunOutcome::Rendered { status: 2, .. }
+        ));
+    }
+    let sentinel = "x".repeat(4096);
+    let unknown = format!("--{sentinel}");
+    let outcome = command(&[&unknown], false);
+    let rendered = format!("{outcome:?}");
+    assert!(
+        !rendered.contains(&sentinel),
+        "unknown argv leaked into usage"
+    );
+    assert!(rendered.len() < 512, "usage error was unbounded");
     let manifest = provider::manifest::<DateProvider>().unwrap();
     assert_eq!(manifest.id.as_str(), "date");
     assert_eq!(manifest.description, DESCRIPTION);
