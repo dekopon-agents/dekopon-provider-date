@@ -3,9 +3,9 @@
 A bounded `date` command for Dekopon agents. It reads the **broker's fresh clock**, not the
 model's recollection, machine environment, or a timestamp supplied by the caller.
 
-Requires the broker clock import `dekopon:clock/wall@1.0.0`; minimum tested host is **0.18.0**.
-Guest SDK and clock bindings, native broker conformance, and shell tests pin published 0.18.0.
-The component exports provider-cli 0.3.0. Version 0.2.0 uses SDK 0.18.0 with unchanged command behavior.
+Requires the broker clock import `dekopon:clock/wall@1.0.0` and the SDK's stdio import.
+This prepublish branch pins core by git revision; the release must use published SDK crates.
+The component exports the stdio-era provider world. The shell word remains `date`.
 
 ## Command
 
@@ -41,9 +41,8 @@ Supported strftime conversions (Chrono performs calendar conversion and formatti
 
 Other conversions, flags, field widths and modifiers are rejected, not guessed. Formats are
 0–256 printable ASCII bytes (spaces allowed; control characters and Unicode rejected).
-An empty `+` prints an empty line. Successful invocation returns a **JSON string with no newline**;
-Dekopon's shell prints it verbatim with one newline and command substitution removes the line
-terminator. It is not an object or JSON number. Default rendering is RFC3339 to whole seconds,
+An empty `+` prints an empty line. Successful invocation streams text followed by one newline;
+command substitution removes the line terminator. There is no returned value. Default rendering is RFC3339 to whole seconds,
 with `Z` at zero offset. Fractional milliseconds are not printed.
 
 ## Local calendar days and DST
@@ -73,8 +72,8 @@ setting, arbitrary timestamps, HTTP, storage, files, secrets, or network access 
 
 ## Authority and bounds
 
-Manifest: provider `date`, word `date`, sole capability **`clock.now`**, read-only / low risk.
-`describe` and `run-command` are pure; only validated `invoke` reads the host clock, exactly once.
+Manifest: provider `date`, word `date`, sole capability **`date.now`**, read-only / low risk.
+Manifest description and CLI proposal are pure; only validated invocation reads the host clock, exactly once.
 Every invocation is fresh. The command proposes; it does not authorize. Direct capability input
 uses the same enforcing typed validation as argv, not merely the model-facing schema:
 
@@ -88,10 +87,10 @@ bytes, 2048 rendered bytes. Errors never echo arbitrary argv. The host must also
 input/output, memory, fuel and time before the SDK parses untrusted wire input.
 
 An operator may adapt the exact-principal [Cedar grant](examples/date.cedar), validated by the
-native broker test. Pair it with an exact `clock.now` constraint set owned by provider `date`:
+real-component test. Pair it with an exact `date.now` constraint set owned by provider `date`:
 
 ```yaml
-clock.now:
+date.now:
   provider: date
   effect: read-only
   risk: Low
@@ -103,7 +102,7 @@ clock.now:
 This is the capability entry, not an entire broker configuration. No HTTP/storage/secret grant
 is needed or appropriate. Recommended host test bounds: 32 MiB memory, 32 million fuel, 4096
 input/output bytes, 10 seconds. Agent catalog/session capability exposure must separately include
-`clock.now`. No runtime configuration or deployment is performed by this repository.
+`date.now`. No runtime configuration or deployment is performed by this repository.
 
 ## Build and validation
 
@@ -119,16 +118,15 @@ DEKOPON_PROVIDER_COMPONENT="$PWD/date-provider.wasm" cargo test --locked --works
 
 Integration tests **fail**, never skip, without `DEKOPON_PROVIDER_COMPONENT`. Tests cover UTC/IANA
 rendering, boundaries, DST and range failures; an empty-linker refusal and fixed-clock component
-plus real shell substitutions; and the published native 0.18.0 broker with Cedar allow/deny and
-`provider_clock_read` trace evidence only inside invoke. Native formatter tests alone do not prove
-the host import works.
+plus real-component conformance, fixed-clock formatting, direct invalid input and unauthorized
+capability refusal. Native formatter tests alone do not prove the host import works.
 
 ## CI and release provenance
 
 CI and release are minimal callers of `dekopon-agents/provider-workflows` at `@main`. No pipeline
 is duplicated here.
-Shared CI checks formatting, dependency policy, native/Wasm lint, byte-identical SDK WIT mirrors,
-component imports, native tests, SBOM, checksum, and independently rebuilt identical bytes.
+Shared CI checks formatting, dependency policy, native/Wasm lint, component imports,
+native tests, SBOM and checksum.
 
 After independent review and an explicitly authorized release, shared release verifies an annotated
 `vVERSION` tag's version/main ancestry, rebuilds/tests, attests the component and SBOM with GitHub

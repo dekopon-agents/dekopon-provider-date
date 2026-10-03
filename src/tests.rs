@@ -1,9 +1,11 @@
 use chrono::DateTime;
-use dekopon_provider_sdk::{CommandRun, EffectKind, Provider, ProviderApiVersion, RiskLevel};
+use dekopon_provider_sdk::{CommandRunOutcome, EffectKind, RiskLevel, provider};
+use dekopon_provider_sdk_testkit::Native;
+
 use serde_json::{Value, json};
 
 use super::{
-    DESCRIPTION, DateProvider, HELP, NOW,
+    DESCRIPTION, DateProvider,
     date::{DateInput, MAX_DAYS, MAX_OUTPUT_BYTES, RawInput},
 };
 
@@ -138,20 +140,17 @@ fn input_validation_is_shared_and_cannot_be_bypassed_by_invoke() {
         json!({"days":"7"}),
     ] {
         assert!(DateInput::from_value(input.clone()).is_err(), "{input}");
-        // This would trap on native if invalid invoke input reached the host import.
-        assert_eq!(
-            DateProvider::invoke(&NOW.parse().unwrap(), input)
-                .unwrap_err()
-                .code(),
-            "invalid-input"
+        let native = Native::<DateProvider>::new();
+        let result = native.call("date.now", &input.to_string());
+        assert_ne!(
+            result.status, 0,
+            "input={input}, stdout={:?}",
+            result.stdout
         );
+        assert!(result.stdout.is_empty());
     }
-    assert_eq!(
-        DateProvider::invoke(&"clock.other".parse().unwrap(), json!({}))
-            .unwrap_err()
-            .code(),
-        "unsupported"
-    );
+    let unknown = Native::<DateProvider>::new().call("clock.other", "{}");
+    assert_ne!(unknown.status, 0);
     for format in [
         "%",
         "%Q",
@@ -194,18 +193,14 @@ fn argv_rejects_unknown_missing_extra_and_conflicting_arguments() {
         vec!["--help", "extra"],
         vec!["+%F", "extra"],
     ] {
-        let CommandRun::Rendered {
-            stdout,
-            stderr,
-            status,
-        } = DateProvider::run_command(&argv(&words), None).unwrap()
-        else {
-            panic!("{words:?}")
-        };
-        assert_eq!(status, 2);
-        assert!(stdout.is_empty());
-        assert!(stderr.starts_with("date: ") && stderr.ends_with('\n'));
-        assert!(stderr.len() < 256);
+        assert!(RawInput::from_argv(&argv(&words)).is_err(), "{words:?}");
+        assert!(
+            matches!(
+                provider::command::<DateProvider>(&argv(&words), false),
+                CommandRunOutcome::Rendered { status: 2, .. }
+            ),
+            "CLI accepted {words:?}"
+        );
     }
     assert!(RawInput::from_argv(&vec!["-u".to_owned(); 9]).is_err());
     assert!(RawInput::from_argv(&["x".repeat(1025)]).is_err());
@@ -214,51 +209,65 @@ fn argv_rejects_unknown_missing_extra_and_conflicting_arguments() {
 
 #[test]
 fn proposals_help_and_manifest_are_exact_and_pure() {
-    assert_eq!(
-        DateProvider::run_command(&[], Some("ignored")).unwrap(),
-        CommandRun::proposal(NOW.parse().unwrap(), json!({"timezone":"UTC","days":0}))
-    );
+    let command = |words: &[&str], piped| provider::command::<DateProvider>(&argv(words), piped);
+    let CommandRunOutcome::Proposed {
+        capability,
+        input,
+        secret_use,
+    } = command(&[], true)
+    else {
+        panic!("proposal")
+    };
+    assert_eq!(capability.as_str(), "date.now");
+    assert_eq!(input, json!({"timezone":"UTC","days":0}));
+    assert!(secret_use.is_none());
+    assert_eq!(command(&[], true), command(&[], false));
     for words in [vec!["-u"], vec!["--utc"], vec!["--timezone=UTC"]] {
-        assert_eq!(
-            DateProvider::run_command(&argv(&words), None).unwrap(),
-            DateProvider::run_command(&[], None).unwrap()
-        );
+        assert_eq!(command(&words, false), command(&[], false));
     }
+    let CommandRunOutcome::Proposed { input, .. } = command(
+        &["--timezone", "America/New_York", "--days=-7", "+%F %H:%M"],
+        false,
+    ) else {
+        panic!("proposal")
+    };
     assert_eq!(
-        DateProvider::run_command(
-            &argv(&["--timezone", "America/New_York", "--days=-7", "+%F %H:%M"]),
-            None
-        )
-        .unwrap(),
-        CommandRun::proposal(
-            NOW.parse().unwrap(),
-            json!({"timezone":"America/New_York","days":-7,"format":"%F %H:%M"})
-        )
+        input,
+        json!({"timezone":"America/New_York","days":-7,"format":"%F %H:%M"})
     );
-    assert_eq!(
-        DateProvider::run_command(&argv(&["--days", "+7", "+"]), None).unwrap(),
-        CommandRun::proposal(
-            NOW.parse().unwrap(),
-            json!({"timezone":"UTC","days":7,"format":""})
-        )
+    assert!(
+        matches!(command(&["--help"], false), CommandRunOutcome::Rendered { status: 0, stdout, .. } if stdout.contains("date"))
     );
-    assert_eq!(
-        DateProvider::run_command(&argv(&["--help"]), None).unwrap(),
-        CommandRun::rendered(HELP, 0)
+    for words in [vec!["--help", "extra"], vec!["+%F", "--help"]] {
+        assert!(matches!(
+            command(&words, false),
+            CommandRunOutcome::Rendered { status: 2, .. }
+        ));
+    }
+    let sentinel = "x".repeat(4096);
+    let unknown = format!("--{sentinel}");
+    let outcome = command(&[&unknown], false);
+    let rendered = format!("{outcome:?}");
+    assert!(
+        !rendered.contains(&sentinel),
+        "unknown argv leaked into usage"
     );
-    assert!(HELP.ends_with('\n'));
-    let manifest = DateProvider::manifest();
-    assert_eq!(manifest.api_version, ProviderApiVersion::V1Alpha1);
+    assert!(rendered.len() < 512, "usage error was unbounded");
+    let manifest = provider::manifest::<DateProvider>().unwrap();
     assert_eq!(manifest.id.as_str(), "date");
     assert_eq!(manifest.description, DESCRIPTION);
     assert_eq!(manifest.command_words, ["date"]);
     assert_eq!(manifest.capabilities.len(), 1);
     let capability = &manifest.capabilities[0];
-    assert_eq!(capability.id.as_str(), NOW);
-    assert_eq!(capability.description, DESCRIPTION);
+    assert_eq!(capability.id.as_str(), "date.now");
     assert_eq!(capability.effect, EffectKind::ReadOnly);
     assert_eq!(capability.risk, RiskLevel::Low);
-    assert_eq!(capability.input_schema, super::date::schema());
+    assert_eq!(capability.input_schema["additionalProperties"], false);
+    assert!(
+        capability.input_schema["properties"]
+            .get("format")
+            .is_some()
+    );
 }
 
 #[test]

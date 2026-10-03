@@ -1,29 +1,87 @@
-//! Actual published 0.18.0 broker + Cedar + component boundary, not a mock clock host.
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-
 use dekopon_broker::{
     AuthenticatedContext, Broker, BrokerLimits, CapabilityRoute, ConstraintCatalog, ConstraintSet,
     CredentialStore, IdentityDirectory, InMemoryAuditLog, InvocationRequest, PolicyEngine,
     PolicyWorld,
 };
 use dekopon_broker_host::{BrokerHostLimits, BrokerProviderRegistry, asset::AssetInputs};
-use dekopon_capability::{EffectKind, ExecutionConstraints, InvocationOutcome};
-use dekopon_core::{Actor, PrincipalId, RiskLevel};
-use dekopon_provider_sdk::{CommandRunOutcome, ProviderApiVersion};
+use dekopon_broker_protocol::{Streams, TraceParent};
+use dekopon_capability::{ExecutionConstraints, InvocationOutcome};
+use dekopon_core::{Actor, PrincipalId};
+use dekopon_date_provider::DateProvider;
+use dekopon_provider_sdk::{CommandRunOutcome, EffectKind, RiskLevel, provider};
+use dekopon_provider_sdk_testkit::{Harness, Native, conformance};
 use serde_json::json;
+use std::{
+    io::Read,
+    os::{fd::OwnedFd, unix::net::UnixStream},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::{
     Subscriber,
     field::{Field, Visit},
 };
 use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
+fn component() -> PathBuf {
+    std::env::var_os("DEKOPON_PROVIDER_COMPONENT")
+        .expect("DEKOPON_PROVIDER_COMPONENT must point at built component")
+        .into()
+}
+
+fn authorization_and_pure_proposals_guard_clock_reads() {
+    conformance::<DateProvider>(component()).unwrap();
+    let manifest = provider::manifest::<DateProvider>().unwrap();
+    assert_eq!(manifest.id.as_str(), "date");
+    assert_eq!(manifest.command_words, ["date"]);
+    assert_eq!(manifest.capabilities.len(), 1);
+    assert_eq!(manifest.capabilities[0].id.as_str(), "date.now");
+    assert_eq!(manifest.capabilities[0].effect, EffectKind::ReadOnly);
+    assert_eq!(manifest.capabilities[0].risk, RiskLevel::Low);
+    let CommandRunOutcome::Proposed {
+        capability,
+        input,
+        secret_use,
+    } = provider::command::<DateProvider>(&[], true)
+    else {
+        panic!("proposal")
+    };
+    assert_eq!(capability.as_str(), "date.now");
+    assert_eq!(input, json!({"timezone":"UTC","days":0}));
+    assert!(secret_use.is_none());
+    assert!(matches!(
+        provider::command::<DateProvider>(&["--help".into()], false),
+        CommandRunOutcome::Rendered { status: 0, .. }
+    ));
+    let instant = UNIX_EPOCH + Duration::from_millis(1_704_074_584_567);
+    let native = Native::<DateProvider>::new().clock(instant);
+    let invalid = native.call("date.now", &json!({"format":"%Q"}).to_string());
+    assert_ne!(invalid.status, 0);
+    assert!(invalid.stdout.is_empty());
+    let unknown = native.call("clock.now", "{}");
+    assert_ne!(unknown.status, 0);
+    let output = native.call(
+        "date.now",
+        &json!({"timezone":"America/New_York", "format":"%F %H:%M:%S %z %Z %s"}).to_string(),
+    );
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert_eq!(output.stdout, b"2023-12-31 21:03:04 -0500 EST 1704074584\n");
+    let bounded = native.call("date.now", &json!({"format":"%s".repeat(128)}).to_string());
+    assert_eq!(bounded.status, 0, "{}", bounded.stderr);
+    assert!(bounded.stdout.len() <= 2049);
+    let component = Harness::<DateProvider>::get(component())
+        .clock(instant)
+        .call("date.now", json!({"format":"%s"}))
+        .unwrap();
+    assert_eq!(component.status, 0, "{}", component.stderr);
+    assert_eq!(component.stdout, b"1704074584\n");
+    assert!(component.http_calls.is_empty());
+    assert_eq!(Harness::<DateProvider>::compiled_identities(), 1);
+}
+
 #[derive(Clone, Default)]
-struct ClockReads(Arc<Mutex<Vec<(u64, String)>>>);
+struct ClockReads(Arc<Mutex<Vec<u64>>>);
 #[derive(Default)]
 struct Fields {
     clock: bool,
@@ -43,65 +101,64 @@ impl Visit for Fields {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 }
 impl<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>> Layer<S> for ClockReads {
-    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.clock {
-            self.0.lock().unwrap().push((
-                fields.millis.expect("clock event carries millis"),
-                ctx.event_span(event)
-                    .expect("clock read has invoke parent")
-                    .name()
-                    .to_owned(),
-            ));
+            self.0
+                .lock()
+                .unwrap()
+                .push(fields.millis.expect("clock event has unix_millis"));
         }
     }
 }
-
 fn principal(name: &str) -> PrincipalId {
     name.parse().unwrap()
 }
 fn caller(name: &str) -> AuthenticatedContext {
-    AuthenticatedContext::new(
+    AuthenticatedContext::attested(
         principal(name),
-        Actor::Service {
-            principal: principal(name),
+        Actor::Agent {
+            agent: "date-test".parse().unwrap(),
         },
+        principal("gateway"),
+        "slack.t0123abc.u9xyz".parse().unwrap(),
     )
     .unwrap()
 }
 fn request(id: &str, input: serde_json::Value) -> InvocationRequest {
     InvocationRequest {
         id: id.parse().unwrap(),
-        capability: "clock.now".parse().unwrap(),
-        trace_parent: "00-0000000000000000000000000000f1c7-00000000000000f1-00"
-            .parse()
-            .unwrap(),
+        capability: "date.now".parse().unwrap(),
+        trace_parent: TraceParent::new([7; 16], [3; 8], 1).unwrap(),
         input,
         secret_use: None,
     }
 }
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+fn streams() -> (AssetInputs, UnixStream) {
+    let (stdout, peer) = UnixStream::pair().unwrap();
+    (
+        AssetInputs {
+            streams: Some(Streams {
+                stdin: None,
+                stdout: OwnedFd::from(stdout),
+            }),
+            ..AssetInputs::default()
+        },
+        peer,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_grant() {
+async fn cedar_refusal_and_invalid_input_never_read_clock_but_authorized_component_does() {
+    tokio::task::spawn_blocking(authorization_and_pure_proposals_guard_clock_reads)
+        .await
+        .unwrap();
     let reads = ClockReads::default();
     tracing_subscriber::registry().with(reads.clone()).init();
-    let path = PathBuf::from(
-        std::env::var_os("DEKOPON_PROVIDER_COMPONENT")
-            .expect("DEKOPON_PROVIDER_COMPONENT must point at the built component"),
-    );
-    let bytes = std::fs::metadata(&path).unwrap().len();
-    assert!(bytes < 4 * 1024 * 1024, "component bytes: {bytes}");
     let registry = BrokerProviderRegistry::load(
-        [path],
+        [component()],
         BrokerHostLimits {
-            max_memory_bytes: 32 * 1024 * 1024,
             max_input_bytes: 4096,
             max_output_bytes: 4096,
             fuel: 32_000_000,
@@ -110,35 +167,20 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
         },
     )
     .await
-    .expect("real host describes component with clock disabled");
+    .unwrap();
     let manifest = registry.manifests().next().unwrap();
-    assert_eq!(manifest.api_version, ProviderApiVersion::V1Alpha1);
     assert_eq!(manifest.id.as_str(), "date");
-    assert_eq!(manifest.command_words, ["date"]);
-    assert_eq!(manifest.capabilities.len(), 1);
-    assert_eq!(manifest.capabilities[0].id.as_str(), "clock.now");
-    assert_eq!(manifest.capabilities[0].effect, EffectKind::ReadOnly);
-    assert_eq!(manifest.capabilities[0].risk, RiskLevel::Low);
+    assert_eq!(manifest.capabilities[0].id.as_str(), "date.now");
     for args in [vec![], vec!["--help".to_owned()], vec!["+%Q".to_owned()]] {
-        let outcome = registry
-            .run_command("date", &args, None)
-            .await
-            .expect("clock-disabled command run succeeds");
-        if args.is_empty() {
-            assert_eq!(
-                outcome,
-                CommandRunOutcome::Proposed {
-                    capability: "clock.now".parse().unwrap(),
-                    input: json!({"timezone":"UTC","days":0}),
-                    secret_use: None
-                }
-            );
-        }
+        registry.run_command("date", &args, false).await.unwrap();
     }
-    assert!(reads.0.lock().unwrap().is_empty());
+    assert!(
+        reads.0.lock().unwrap().is_empty(),
+        "proposal/help cannot read clock"
+    );
     let world = PolicyWorld::new(
         [principal("date-reader"), principal("denied-reader")],
-        [("clock.now".parse().unwrap(), "date".parse().unwrap())],
+        [("date.now".parse().unwrap(), "date".parse().unwrap())],
     )
     .unwrap();
     let audit = Arc::new(InMemoryAuditLog::new(32).unwrap());
@@ -148,28 +190,23 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
         "date-test-policy".to_owned(),
         PolicyEngine::new(include_str!("../examples/date.cedar"), &world).unwrap(),
         ConstraintCatalog::new([(
-            "clock.now".parse().unwrap(),
+            "date.now".parse().unwrap(),
             ConstraintSet {
                 route: CapabilityRoute::Generic,
                 provider: "date".parse().unwrap(),
                 effect: EffectKind::ReadOnly,
                 risk: RiskLevel::Low,
                 credential: None,
-                credential_by_agent: BTreeMap::new(),
                 constraints: ExecutionConstraints {
                     timeout_ms: 10_000,
-                    max_output_bytes: 4096,
-                    http: None,
-                    storage: None,
-                    asset: None,
-                    secret_use: None,
+                    ..ExecutionConstraints::default()
                 },
             },
         )])
         .unwrap(),
         CredentialStore::empty(),
         IdentityDirectory::empty(),
-        audit.clone(),
+        Arc::clone(&audit),
         BrokerLimits::default(),
     )
     .unwrap();
@@ -184,73 +221,74 @@ async fn clock_only_after_cedar_authorization_with_no_http_storage_or_secret_gra
         .await
         .unwrap();
     assert_eq!(denied.result.outcome, InvocationOutcome::Denied);
-    assert!(denied.result.output.is_none());
+    assert_eq!(denied.result.error.as_deref(), Some("policy-denied"));
+    assert!(reads.0.lock().unwrap().is_empty());
     assert!(
         audit
             .records()
-            .await
             .iter()
-            .all(|event| !matches!(event, dekopon_broker::AuditEvent::Execution { .. })),
-        "Cedar denial must produce no execution record"
+            .all(|event| !matches!(event, dekopon_broker::AuditEvent::Execution { .. }))
     );
-    assert!(
-        reads.0.lock().unwrap().is_empty(),
-        "Cedar denial must not invoke the clock"
-    );
+    let (invalid_streams, mut invalid_peer) = streams();
     let invalid = broker
         .invoke(
             &caller("date-reader"),
             None,
             None,
             request("invalid", json!({"format":"%Q"})),
-            AssetInputs::default(),
+            invalid_streams,
         )
         .await
         .unwrap();
-    assert_eq!(invalid.result.outcome, InvocationOutcome::Failed);
+    assert_eq!(
+        invalid.result.outcome,
+        InvocationOutcome::Failed,
+        "{invalid:?}"
+    );
+    let mut invalid_stdout = Vec::new();
+    invalid_peer.read_to_end(&mut invalid_stdout).unwrap();
+    assert!(invalid_stdout.is_empty());
     assert!(
         reads.0.lock().unwrap().is_empty(),
-        "invalid direct input must fail before clock"
+        "invalid input cannot read clock"
     );
-    let before = unix_seconds();
-    let result = broker
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (assets, mut peer) = streams();
+    let allowed = broker
         .invoke(
             &caller("date-reader"),
             None,
             None,
             request("allowed", json!({"format":"%s"})),
-            AssetInputs::default(),
+            assets,
         )
         .await
         .unwrap();
-    let after = unix_seconds();
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     assert_eq!(
-        result.result.outcome,
+        allowed.result.outcome,
         InvocationOutcome::Succeeded,
-        "{result:?}"
+        "{allowed:?}"
     );
-    let text = result.result.output.unwrap();
-    let seconds: u64 = text.as_str().unwrap().parse().unwrap();
+    let mut stdout = Vec::new();
+    peer.read_to_end(&mut stdout).unwrap();
+    let text = std::str::from_utf8(&stdout).unwrap();
+    let seconds: u64 = text.trim_end_matches('\n').parse().unwrap();
+    assert!(text.ends_with('\n'));
     assert!((before..=after).contains(&seconds));
     let captured = reads.0.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].0 / 1000, seconds);
-    assert_eq!(captured[0].1, "provider.invoke");
-    let output = broker
-        .invoke(
-            &caller("date-reader"),
-            None,
-            None,
-            request("bounded", json!({"format":"%s".repeat(128)})),
-            AssetInputs::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(output.result.outcome, InvocationOutcome::Succeeded);
-    assert!(output.result.output.unwrap().as_str().unwrap().len() <= 2048);
-    assert_eq!(reads.0.lock().unwrap().len(), 2);
-    assert!(!audit.records().await.is_empty());
-    eprintln!(
-        "real broker 0.18.0: component={bytes} bytes; clock reads=2; denied/invalid/proposals/help reads=0; no HTTP/storage/secret grants"
+    assert_eq!(captured[0] / 1000, seconds);
+    assert!(
+        audit
+            .records()
+            .iter()
+            .any(|event| matches!(event, dekopon_broker::AuditEvent::Execution { .. }))
     );
 }

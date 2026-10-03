@@ -1,78 +1,106 @@
 //! Date formatting owns no clock: only authorized invocation reads the broker's clock import.
 
-mod date;
+pub mod date;
 
-use date::{DateInput, RawInput};
-use dekopon_provider_sdk::{
-    CapabilityId, CommandRun, EffectKind, Provider, ProviderApiVersion, ProviderCapability,
-    ProviderError, ProviderManifest, RiskLevel,
-};
-use serde_json::{Value, json};
+use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
+use date::{DateError, DateInput, RawInput};
+use dekopon_provider_sdk::provider::{Capability, Clock, Proposal, Provider, Stdout, Usage};
+use dekopon_provider_sdk::{EffectKind, RiskLevel};
+use std::io::Write;
 
-mod bindings {
-    wit_bindgen::generate!({
-        path: "wit",
-        world: "provider",
-        generate_all,
-        pub_export_macro: true,
-    });
-}
-
-struct DateProvider;
-const NOW: &str = "clock.now";
-const HELP: &str = include_str!("help.txt");
+pub struct DateProvider;
+pub struct Now;
 const DESCRIPTION: &str =
     "Formats the fresh broker clock with explicit timezone and local calendar-day offsets";
 
-impl Provider for DateProvider {
-    fn manifest() -> ProviderManifest {
-        ProviderManifest {
-            api_version: ProviderApiVersion::V1Alpha1,
-            id: "date".parse().expect("static provider ID"),
-            description: DESCRIPTION.to_owned(),
-            command_words: vec!["date".to_owned()],
-            capabilities: vec![ProviderCapability {
-                id: NOW.parse().expect("static capability ID"),
-                description: DESCRIPTION.to_owned(),
-                effect: EffectKind::ReadOnly,
-                risk: RiskLevel::Low,
-                input_schema: date::schema(),
-            }],
-        }
-    }
+#[derive(Parser)]
+#[command(name = "date", about = DESCRIPTION, disable_help_flag = true, trailing_var_arg = true)]
+struct Grammar {
+    #[arg(allow_hyphen_values = true)]
+    words: Vec<String>,
+}
 
-    fn invoke(capability: &CapabilityId, input: Value) -> Result<Value, ProviderError> {
-        if capability.as_str() != NOW {
-            return Err(ProviderError::new(
-                "unsupported",
-                "date implements only clock.now",
+pub struct DateArgs(RawInput);
+
+impl CommandFactory for DateArgs {
+    fn command() -> Command {
+        Grammar::command()
+    }
+    fn command_for_update() -> Command {
+        Grammar::command_for_update()
+    }
+}
+impl FromArgMatches for DateArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let args = Grammar::from_arg_matches(matches)?;
+        if args.words.first().is_some_and(|word| word == "--help") {
+            return if args.words.len() == 1 {
+                Err(clap::Error::raw(
+                    ErrorKind::DisplayHelp,
+                    include_str!("help.txt"),
+                ))
+            } else {
+                Err(clap::Error::raw(
+                    ErrorKind::ArgumentConflict,
+                    "date: --help must stand alone",
+                ))
+            };
+        }
+        if args.words.iter().any(|word| word == "--help") {
+            return Err(clap::Error::raw(
+                ErrorKind::ArgumentConflict,
+                "date: --help must stand alone",
             ));
         }
-        // The schema is metadata, not enforcement. Validate again before touching the host.
-        let input = DateInput::from_value(input)?;
-        let millis = dekopon_provider_clock::now_unix_millis();
-        // The shell prints a JSON string verbatim and adds one newline; do not double it here.
-        Ok(json!(input.render(millis)?))
+        RawInput::from_argv(&args.words).map(Self).map_err(|_| {
+            clap::Error::raw(
+                ErrorKind::InvalidValue,
+                "date: invalid arguments (try date --help)",
+            )
+        })
     }
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+impl Parser for DateArgs {}
 
-    fn run_command(argv: &[String], _stdin: Option<&str>) -> Result<CommandRun, ProviderError> {
-        if argv.len() == 1 && argv[0] == "--help" {
-            return Ok(CommandRun::rendered(HELP, 0));
-        }
-        match RawInput::from_argv(argv) {
-            Ok(input) => Ok(CommandRun::proposal(
-                NOW.parse().expect("static capability ID"),
-                serde_json::to_value(input).expect("bounded input serializes"),
-            )),
-            Err(error) => Ok(CommandRun::rendered_error(
-                format!("date: {}\nTry 'date --help'.\n", error.message()),
-                2,
-            )),
-        }
+impl Provider for DateProvider {
+    const ID: &'static str = "date";
+    const COMMAND_WORDS: &'static [&'static str] = &["date"];
+    const DESCRIPTION: &'static str = DESCRIPTION;
+    type Args = DateArgs;
+    type Capabilities = (Now,);
+
+    fn propose(args: Self::Args, _stdin_piped: bool) -> Result<Proposal<Self>, Usage> {
+        Ok(Proposal::to::<Now>(args.0))
     }
 }
 
-dekopon_provider_sdk::export_provider_with_cli!(DateProvider, bindings);
+impl Capability for Now {
+    type Provider = DateProvider;
+    const NAME: &'static str = "now";
+    const DESCRIPTION: &'static str = DESCRIPTION;
+    const EFFECT: EffectKind = EffectKind::ReadOnly;
+    const RISK: RiskLevel = RiskLevel::Low;
+    type Input = RawInput;
+    type Needs = Clock;
+    type Error = DateError;
+
+    fn run(input: RawInput, clock: Clock, out: &mut Stdout) -> Result<(), DateError> {
+        let input = DateInput::from_raw(input)?;
+        let rendered = input.render(clock.now_unix_millis())?;
+        out.write_all(rendered.as_bytes())
+            .and_then(|_| out.write_all(b"\n"))
+            .map_err(|_| DateError::new("output-limit", "date output could not be written"))
+    }
+}
+
+#[allow(unsafe_code)]
+mod export {
+    dekopon_provider_sdk::export!(super::DateProvider);
+}
 
 #[cfg(test)]
 mod tests;
