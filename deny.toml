@@ -8,6 +8,8 @@ all-features = false
 [advisories]
 ignore = [
   { id = "RUSTSEC-2024-0449", reason = "unmaintained, not a vulnerability: unsafe-libyaml 0.2.11 reaches the graph only through dekopon-core's serde_yaml_ng 0.10; removable with dekopon#542" },
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained, not a vulnerability: chrono 0.4.45 is a direct dependency of dekopon-date-provider and also reaches the graph through cedar-policy-core 4.13.0; removable when date moves off chrono and cedar-policy-core drops it" },
+  { id = "RUSTSEC-2026-0555", reason = "unmaintained, not a vulnerability: chrono-tz 0.10.4 is a direct dependency of dekopon-date-provider; removable when date moves off chrono-tz" },
 ]
 
 [licenses]
